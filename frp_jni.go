@@ -7,72 +7,95 @@ package main
 import "C"
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
 	"syscall"
 	"unsafe"
 
-	"github.com/fatedier/frp/cmd/frpc"
-	"github.com/fatedier/frp/cmd/frps"
+	"github.com/fatedier/frp/client"
+	"github.com/fatedier/frp/pkg/config"
+	"github.com/fatedier/frp/server"
 )
 
 var (
-	frpcRunning bool
-	frpsRunning bool
-	mu          sync.Mutex
-
-	logCallback    func(msg *C.char)
-	statusCallback func(status *C.char)
+	cli        *client.Client
+	svr        *server.Server
+	mu         sync.Mutex
+	logCb      func(msg *C.char)
+	statusCb   func(status *C.char)
 )
 
 //export RegisterLogCallback
 func RegisterLogCallback(cb uintptr) {
-	logCallback = *(*func(msg *C.char))(unsafe.Pointer(cb))
+	logCb = *(*func(msg *C.char))(unsafe.Pointer(cb))
 }
 
 //export RegisterStatusCallback
 func RegisterStatusCallback(cb uintptr) {
-	statusCallback = *(*func(status *C.char))(unsafe.Pointer(cb))
+	statusCb = *(*func(status *C.char))(unsafe.Pointer(cb))
 }
 
 func logf(format string, args ...interface{}) {
 	msg := C.CString(fmt.Sprintf(format, args...))
 	defer C.free(unsafe.Pointer(msg))
-	if logCallback != nil {
-		logCallback(msg)
+	if logCb != nil {
+		logCb(msg)
 	}
 }
 
-func sendStatus(status string) {
-	cs := C.CString(status)
+func status(s string) {
+	cs := C.CString(s)
 	defer C.free(unsafe.Pointer(cs))
-	if statusCallback != nil {
-		statusCallback(cs)
+	if statusCb != nil {
+		statusCb(cs)
 	}
 }
 
+// 从 ini 路径启动 frpc
 //export StartFrpc
-func StartFrpc(configPath *C.char) {
+func StartFrpc(cfgPath *C.char) {
 	mu.Lock()
-	if frpcRunning {
+	if cli != nil {
 		mu.Unlock()
 		logf("frpc already running")
 		return
 	}
-	frpcRunning = true
 	mu.Unlock()
 
-	sendStatus("FRPC_STARTING")
 	go func() {
-		defer func() {
-			mu.Lock()
-			frpcRunning = false
-			mu.Unlock()
-			sendStatus("FRPC_STOPPED")
-		}()
-		os.Args = []string{"frpc", "-c", C.GoString(configPath)}
-		frpc.Main()
+		status("FRPC_STARTING")
+		path := C.GoString(cfgPath)
+
+		cfg, pxyCfgs, _, err := config.LoadClientConfig(path)
+		if err != nil {
+			logf("config error: %v", err)
+			status("FRPC_FAILED")
+			return
+		}
+
+		c, err := client.NewClient(cfg, pxyCfgs, nil)
+		if err != nil {
+			logf("client error: %v", err)
+			status("FRPC_FAILED")
+			return
+		}
+
+		mu.Lock()
+		cli = c
+		mu.Unlock()
+
+		logf("frpc started")
+		status("FRPC_RUNNING")
+
+		<-c.ClosedCh()
+		logf("frpc closed")
+		status("FRPC_STOPPED")
+
+		mu.Lock()
+		cli = nil
+		mu.Unlock()
 	}()
 }
 
@@ -80,34 +103,57 @@ func StartFrpc(configPath *C.char) {
 func StopFrpc() {
 	mu.Lock()
 	defer mu.Unlock()
-	if !frpcRunning {
-		return
+	if cli != nil {
+		cli.Close()
+		cli = nil
+		logf("frpc stop success")
+		status("FRPC_STOPPING")
 	}
-	sendStatus("FRPC_STOPPING")
-	syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 }
 
+// 从 ini 路径启动 frps
 //export StartFrps
-func StartFrps(configPath *C.char) {
+func StartFrps(cfgPath *C.char) {
 	mu.Lock()
-	if frpsRunning {
+	if svr != nil {
 		mu.Unlock()
 		logf("frps already running")
 		return
 	}
-	frpsRunning = true
 	mu.Unlock()
 
-	sendStatus("FRPS_STARTING")
 	go func() {
-		defer func() {
-			mu.Lock()
-			frpsRunning = false
-			mu.Unlock()
-			sendStatus("FRPS_STOPPED")
-		}()
-		os.Args = []string{"frps", "-c", C.GoString(configPath)}
-		frps.Main()
+		status("FRPS_STARTING")
+		path := C.GoString(cfgPath)
+
+		cfg, err := config.LoadServerConfig(path)
+		if err != nil {
+			logf("server config err: %v", err)
+			status("FRPS_FAILED")
+			return
+		}
+
+		s, err := server.NewServer(cfg)
+		if err != nil {
+			logf("server err: %v", err)
+			status("FRPS_FAILED")
+			return
+		}
+
+		mu.Lock()
+		svr = s
+		mu.Unlock()
+
+		logf("frps started")
+		status("FRPS_RUNNING")
+
+		<-s.ClosedCh()
+		logf("frps closed")
+		status("FRPS_STOPPED")
+
+		mu.Lock()
+		svr = nil
+		mu.Unlock()
 	}()
 }
 
@@ -115,11 +161,12 @@ func StartFrps(configPath *C.char) {
 func StopFrps() {
 	mu.Lock()
 	defer mu.Unlock()
-	if !frpsRunning {
-		return
+	if svr != nil {
+		svr.Close()
+		svr = nil
+		logf("frps stop success")
+		status("FRPS_STOPPING")
 	}
-	sendStatus("FRPS_STOPPING")
-	syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 }
 
 func main() {}
