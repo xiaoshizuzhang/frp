@@ -64,17 +64,13 @@ func StartFrpc(configPath *C.char) {
 	mu.Unlock()
 
 	sendStatus("FRPC_STARTING")
-	logf("start frpc with config: %s", C.GoString(configPath))
-
 	go func() {
 		defer func() {
 			mu.Lock()
 			frpcRunning = false
 			mu.Unlock()
 			sendStatus("FRPC_STOPPED")
-			logf("frpc stopped")
 		}()
-
 		os.Args = []string{"frpc", "-c", C.GoString(configPath)}
 		frpc.Main()
 	}()
@@ -85,11 +81,9 @@ func StopFrpc() {
 	mu.Lock()
 	defer mu.Unlock()
 	if !frpcRunning {
-		logf("frpc not running")
 		return
 	}
 	sendStatus("FRPC_STOPPING")
-	logf("stopping frpc...")
 	syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 }
 
@@ -105,17 +99,13 @@ func StartFrps(configPath *C.char) {
 	mu.Unlock()
 
 	sendStatus("FRPS_STARTING")
-	logf("start frps with config: %s", C.GoString(configPath))
-
 	go func() {
 		defer func() {
 			mu.Lock()
 			frpsRunning = false
 			mu.Unlock()
 			sendStatus("FRPS_STOPPED")
-			logf("frps stopped")
 		}()
-
 		os.Args = []string{"frps", "-c", C.GoString(configPath)}
 		frps.Main()
 	}()
@@ -126,11 +116,9 @@ func StopFrps() {
 	mu.Lock()
 	defer mu.Unlock()
 	if !frpsRunning {
-		logf("frps not running")
 		return
 	}
 	sendStatus("FRPS_STOPPING")
-	logf("stopping frps...")
 	syscall.Kill(syscall.Getpid(), syscall.SIGINT)
 }
 
