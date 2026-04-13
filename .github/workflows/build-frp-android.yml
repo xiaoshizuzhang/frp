@@ -13,26 +13,22 @@ jobs:
         arch: [ arm64-v8a, armeabi-v7a ]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: 1.22
 
-      # 自动下载 frp 依赖，生成 go.sum（修复本次报错！）
-      - name: Download dependencies
+      - name: Get dependencies
         run: go mod tidy
 
-      # 官方稳定 NDK，永不失败
-      - name: Setup Android NDK
+      - name: Setup NDK
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26c
           link-to-sdk: true
 
-      # 编译核心逻辑
       - name: Build ${{ matrix.arch }}
         run: |
           NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -48,8 +44,7 @@ jobs:
 
           go build -ldflags "-s -w" -buildmode=c-shared -o build/${{ matrix.arch }}/libfrp.so
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: frp-jni-${{ matrix.arch }}
           path: build/${{ matrix.arch }}/
