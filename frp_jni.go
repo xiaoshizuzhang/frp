@@ -7,24 +7,19 @@ package main
 import "C"
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
 	"sync"
-	"syscall"
 	"unsafe"
 
 	"github.com/fatedier/frp/client"
-	"github.com/fatedier/frp/pkg/config"
 	"github.com/fatedier/frp/server"
 )
 
 var (
-	cli        *client.Client
-	svr        *server.Server
-	mu         sync.Mutex
-	logCb      func(msg *C.char)
-	statusCb   func(status *C.char)
+	cli    *client.Client
+	svr    *server.Server
+	mu     sync.Mutex
+	logCb  func(msg *C.char)
+	statCb func(status *C.char)
 )
 
 //export RegisterLogCallback
@@ -34,11 +29,11 @@ func RegisterLogCallback(cb uintptr) {
 
 //export RegisterStatusCallback
 func RegisterStatusCallback(cb uintptr) {
-	statusCb = *(*func(status *C.char))(unsafe.Pointer(cb))
+	statCb = *(*func(status *C.char))(unsafe.Pointer(cb))
 }
 
 func logf(format string, args ...interface{}) {
-	msg := C.CString(fmt.Sprintf(format, args...))
+	msg := C.CString(format)
 	defer C.free(unsafe.Pointer(msg))
 	if logCb != nil {
 		logCb(msg)
@@ -48,12 +43,11 @@ func logf(format string, args ...interface{}) {
 func status(s string) {
 	cs := C.CString(s)
 	defer C.free(unsafe.Pointer(cs))
-	if statusCb != nil {
-		statusCb(cs)
+	if statCb != nil {
+		statCb(cs)
 	}
 }
 
-// 从 ini 路径启动 frpc
 //export StartFrpc
 func StartFrpc(cfgPath *C.char) {
 	mu.Lock()
@@ -66,18 +60,9 @@ func StartFrpc(cfgPath *C.char) {
 
 	go func() {
 		status("FRPC_STARTING")
-		path := C.GoString(cfgPath)
-
-		cfg, pxyCfgs, _, err := config.LoadClientConfig(path)
+		c, err := client.NewClientFromPath(C.GoString(cfgPath))
 		if err != nil {
-			logf("config error: %v", err)
-			status("FRPC_FAILED")
-			return
-		}
-
-		c, err := client.NewClient(cfg, pxyCfgs, nil)
-		if err != nil {
-			logf("client error: %v", err)
+			logf("frpc start failed: " + err.Error())
 			status("FRPC_FAILED")
 			return
 		}
@@ -88,11 +73,8 @@ func StartFrpc(cfgPath *C.char) {
 
 		logf("frpc started")
 		status("FRPC_RUNNING")
-
 		<-c.ClosedCh()
-		logf("frpc closed")
 		status("FRPC_STOPPED")
-
 		mu.Lock()
 		cli = nil
 		mu.Unlock()
@@ -106,12 +88,11 @@ func StopFrpc() {
 	if cli != nil {
 		cli.Close()
 		cli = nil
-		logf("frpc stop success")
 		status("FRPC_STOPPING")
+		logf("frpc stopped")
 	}
 }
 
-// 从 ini 路径启动 frps
 //export StartFrps
 func StartFrps(cfgPath *C.char) {
 	mu.Lock()
@@ -124,18 +105,9 @@ func StartFrps(cfgPath *C.char) {
 
 	go func() {
 		status("FRPS_STARTING")
-		path := C.GoString(cfgPath)
-
-		cfg, err := config.LoadServerConfig(path)
+		s, err := server.NewServerFromPath(C.GoString(cfgPath))
 		if err != nil {
-			logf("server config err: %v", err)
-			status("FRPS_FAILED")
-			return
-		}
-
-		s, err := server.NewServer(cfg)
-		if err != nil {
-			logf("server err: %v", err)
+			logf("frps start failed: " + err.Error())
 			status("FRPS_FAILED")
 			return
 		}
@@ -146,11 +118,8 @@ func StartFrps(cfgPath *C.char) {
 
 		logf("frps started")
 		status("FRPS_RUNNING")
-
 		<-s.ClosedCh()
-		logf("frps closed")
 		status("FRPS_STOPPED")
-
 		mu.Lock()
 		svr = nil
 		mu.Unlock()
@@ -164,8 +133,8 @@ func StopFrps() {
 	if svr != nil {
 		svr.Close()
 		svr = nil
-		logf("frps stop success")
 		status("FRPS_STOPPING")
+		logf("frps stopped")
 	}
 }
 
