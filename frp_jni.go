@@ -7,19 +7,19 @@ package main
 import "C"
 
 import (
+	"os"
+	"os/exec"
 	"sync"
 	"unsafe"
-
-	"github.com/fatedier/frp/client"
-	"github.com/fatedier/frp/server"
 )
 
 var (
-	cli    *client.Client
-	svr    *server.Server
-	mu     sync.Mutex
-	logCb  func(msg *C.char)
-	statCb func(status *C.char)
+	frpcCmd *exec.Cmd
+	frpsCmd *exec.Cmd
+	mu      sync.Mutex
+
+	logCb    func(msg *C.char)
+	statusCb func(status *C.char)
 )
 
 //export RegisterLogCallback
@@ -29,29 +29,29 @@ func RegisterLogCallback(cb uintptr) {
 
 //export RegisterStatusCallback
 func RegisterStatusCallback(cb uintptr) {
-	statCb = *(*func(status *C.char))(unsafe.Pointer(cb))
+	statusCb = *(*func(status *C.char))(unsafe.Pointer(cb))
 }
 
-func logf(format string, args ...interface{}) {
-	msg := C.CString(format)
-	defer C.free(unsafe.Pointer(msg))
+func logf(s string) {
+	cs := C.CString(s)
+	defer C.free(unsafe.Pointer(cs))
 	if logCb != nil {
-		logCb(msg)
+		logCb(cs)
 	}
 }
 
 func status(s string) {
 	cs := C.CString(s)
 	defer C.free(unsafe.Pointer(cs))
-	if statCb != nil {
-		statCb(cs)
+	if statusCb != nil {
+		statusCb(cs)
 	}
 }
 
 //export StartFrpc
-func StartFrpc(cfgPath *C.char) {
+func StartFrpc(config *C.char) {
 	mu.Lock()
-	if cli != nil {
+	if frpcCmd != nil {
 		mu.Unlock()
 		logf("frpc already running")
 		return
@@ -60,23 +60,34 @@ func StartFrpc(cfgPath *C.char) {
 
 	go func() {
 		status("FRPC_STARTING")
-		c, err := client.NewClientFromPath(C.GoString(cfgPath))
-		if err != nil {
+		path := C.GoString(config)
+		cmd := exec.Command("./frpc", "-c", path)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		mu.Lock()
+		frpcCmd = cmd
+		mu.Unlock()
+
+		logf("frpc starting...")
+		if err := cmd.Start(); err != nil {
 			logf("frpc start failed: " + err.Error())
 			status("FRPC_FAILED")
+			mu.Lock()
+			frpcCmd = nil
+			mu.Unlock()
 			return
 		}
 
-		mu.Lock()
-		cli = c
-		mu.Unlock()
-
-		logf("frpc started")
 		status("FRPC_RUNNING")
-		<-c.ClosedCh()
+		logf("frpc started")
+
+		_ = cmd.Wait()
 		status("FRPC_STOPPED")
+		logf("frpc stopped")
+
 		mu.Lock()
-		cli = nil
+		frpcCmd = nil
 		mu.Unlock()
 	}()
 }
@@ -85,18 +96,18 @@ func StartFrpc(cfgPath *C.char) {
 func StopFrpc() {
 	mu.Lock()
 	defer mu.Unlock()
-	if cli != nil {
-		cli.Close()
-		cli = nil
+	if frpcCmd != nil && frpcCmd.Process != nil {
+		_ = frpcCmd.Process.Kill()
+		frpcCmd = nil
 		status("FRPC_STOPPING")
 		logf("frpc stopped")
 	}
 }
 
 //export StartFrps
-func StartFrps(cfgPath *C.char) {
+func StartFrps(config *C.char) {
 	mu.Lock()
-	if svr != nil {
+	if frpsCmd != nil {
 		mu.Unlock()
 		logf("frps already running")
 		return
@@ -105,23 +116,34 @@ func StartFrps(cfgPath *C.char) {
 
 	go func() {
 		status("FRPS_STARTING")
-		s, err := server.NewServerFromPath(C.GoString(cfgPath))
-		if err != nil {
+		path := C.GoString(config)
+		cmd := exec.Command("./frps", "-c", path)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		mu.Lock()
+		frpsCmd = cmd
+		mu.Unlock()
+
+		logf("frps starting...")
+		if err := cmd.Start(); err != nil {
 			logf("frps start failed: " + err.Error())
 			status("FRPS_FAILED")
+			mu.Lock()
+			frpsCmd = nil
+			mu.Unlock()
 			return
 		}
 
-		mu.Lock()
-		svr = s
-		mu.Unlock()
-
-		logf("frps started")
 		status("FRPS_RUNNING")
-		<-s.ClosedCh()
+		logf("frps started")
+
+		_ = cmd.Wait()
 		status("FRPS_STOPPED")
+		logf("frps stopped")
+
 		mu.Lock()
-		svr = nil
+		frpsCmd = nil
 		mu.Unlock()
 	}()
 }
@@ -130,9 +152,9 @@ func StartFrps(cfgPath *C.char) {
 func StopFrps() {
 	mu.Lock()
 	defer mu.Unlock()
-	if svr != nil {
-		svr.Close()
-		svr = nil
+	if frpsCmd != nil && frpsCmd.Process != nil {
+		_ = frpsCmd.Process.Kill()
+		frpsCmd = nil
 		status("FRPS_STOPPING")
 		logf("frps stopped")
 	}
