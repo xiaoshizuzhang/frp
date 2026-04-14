@@ -18,38 +18,61 @@ var (
 	frpsCmd *exec.Cmd
 	mu      sync.Mutex
 
-	logCb    func(msg *C.char)
-	statusCb func(status *C.char)
+	logCB    func(string)
+	statusCB func(string)
 )
 
-//export RegisterLogCallback
-func RegisterLogCallback(cb uintptr) {
-	logCb = *(*func(msg *C.char))(unsafe.Pointer(cb))
+//export Java_com_handreace_frp_FrpManager_registerLogCallback
+func Java_com_handreace_frp_FrpManager_registerLogCallback(env uintptr, clazz uintptr, cb uintptr) {
+	logCB = func(s string) {
+		cs := C.CString(s)
+		CallJavaVoidMethod(env, cb, cs)
+		C.free(unsafe.Pointer(cs))
+	}
 }
 
-//export RegisterStatusCallback
-func RegisterStatusCallback(cb uintptr) {
-	statusCb = *(*func(status *C.char))(unsafe.Pointer(cb))
+//export Java_com_handreace_frp_FrpManager_registerStatusCallback
+func Java_com_handreace_frp_FrpManager_registerStatusCallback(env uintptr, clazz uintptr, cb uintptr) {
+	statusCB = func(s string) {
+		cs := C.CString(s)
+		CallJavaVoidMethod(env, cb, cs)
+		C.free(unsafe.Pointer(cs))
+	}
+}
+
+//export Java_com_handreace_frp_FrpManager_startFrpc
+func Java_com_handreace_frp_FrpManager_startFrpc(env uintptr, clazz uintptr, path *C.char) {
+	go startFrpc(C.GoString(path))
+}
+
+//export Java_com_handreace_frp_FrpManager_stopFrpc
+func Java_com_handreace_frp_FrpManager_stopFrpc(env uintptr, clazz uintptr) {
+	stopFrpc()
+}
+
+//export Java_com_handreace_frp_FrpManager_startFrps
+func Java_com_handreace_frp_FrpManager_startFrps(env uintptr, clazz uintptr, path *C.char) {
+	go startFrps(C.GoString(path))
+}
+
+//export Java_com_handreace_frp_FrpManager_stopFrps
+func Java_com_handreace_frp_FrpManager_stopFrps(env uintptr, clazz uintptr) {
+	stopFrps()
 }
 
 func logf(s string) {
-	cs := C.CString(s)
-	defer C.free(unsafe.Pointer(cs))
-	if logCb != nil {
-		logCb(cs)
+	if logCB != nil {
+		logCB(s)
 	}
 }
 
-func status(s string) {
-	cs := C.CString(s)
-	defer C.free(unsafe.Pointer(cs))
-	if statusCb != nil {
-		statusCb(cs)
+func sendStatus(s string) {
+	if statusCB != nil {
+		statusCB(s)
 	}
 }
 
-//export StartFrpc
-func StartFrpc(config *C.char) {
+func startFrpc(path string) {
 	mu.Lock()
 	if frpcCmd != nil {
 		mu.Unlock()
@@ -58,54 +81,46 @@ func StartFrpc(config *C.char) {
 	}
 	mu.Unlock()
 
-	go func() {
-		status("FRPC_STARTING")
-		path := C.GoString(config)
-		cmd := exec.Command("./frpc", "-c", path)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+	sendStatus("FRPC_STARTING")
+	cmd := exec.Command("/system/bin/sh", "-c", "frpc -c "+path)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-		mu.Lock()
-		frpcCmd = cmd
-		mu.Unlock()
+	mu.Lock()
+	frpcCmd = cmd
+	mu.Unlock()
 
-		logf("frpc starting...")
-		if err := cmd.Start(); err != nil {
-			logf("frpc start failed: " + err.Error())
-			status("FRPC_FAILED")
-			mu.Lock()
-			frpcCmd = nil
-			mu.Unlock()
-			return
-		}
-
-		status("FRPC_RUNNING")
-		logf("frpc started")
-
-		_ = cmd.Wait()
-		status("FRPC_STOPPED")
-		logf("frpc stopped")
-
+	if err := cmd.Start(); err != nil {
+		logf("frpc start failed: " + err.Error())
+		sendStatus("FRPC_FAILED")
 		mu.Lock()
 		frpcCmd = nil
 		mu.Unlock()
-	}()
+		return
+	}
+
+	sendStatus("FRPC_RUNNING")
+	logf("frpc started")
+	_ = cmd.Wait()
+	sendStatus("FRPC_STOPPED")
+
+	mu.Lock()
+	frpcCmd = nil
+	mu.Unlock()
 }
 
-//export StopFrpc
-func StopFrpc() {
+func stopFrpc() {
 	mu.Lock()
 	defer mu.Unlock()
 	if frpcCmd != nil && frpcCmd.Process != nil {
 		_ = frpcCmd.Process.Kill()
 		frpcCmd = nil
-		status("FRPC_STOPPING")
+		sendStatus("FRPC_STOPPING")
 		logf("frpc stopped")
 	}
 }
 
-//export StartFrps
-func StartFrps(config *C.char) {
+func startFrps(path string) {
 	mu.Lock()
 	if frpsCmd != nil {
 		mu.Unlock()
@@ -114,50 +129,46 @@ func StartFrps(config *C.char) {
 	}
 	mu.Unlock()
 
-	go func() {
-		status("FRPS_STARTING")
-		path := C.GoString(config)
-		cmd := exec.Command("./frps", "-c", path)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+	sendStatus("FRPS_STARTING")
+	cmd := exec.Command("/system/bin/sh", "-c", "frps -c "+path)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-		mu.Lock()
-		frpsCmd = cmd
-		mu.Unlock()
+	mu.Lock()
+	frpsCmd = cmd
+	mu.Unlock()
 
-		logf("frps starting...")
-		if err := cmd.Start(); err != nil {
-			logf("frps start failed: " + err.Error())
-			status("FRPS_FAILED")
-			mu.Lock()
-			frpsCmd = nil
-			mu.Unlock()
-			return
-		}
-
-		status("FRPS_RUNNING")
-		logf("frps started")
-
-		_ = cmd.Wait()
-		status("FRPS_STOPPED")
-		logf("frps stopped")
-
+	if err := cmd.Start(); err != nil {
+		logf("frps start failed: " + err.Error())
+		sendStatus("FRPS_FAILED")
 		mu.Lock()
 		frpsCmd = nil
 		mu.Unlock()
-	}()
+		return
+	}
+
+	sendStatus("FRPS_RUNNING")
+	logf("frps started")
+	_ = cmd.Wait()
+	sendStatus("FRPS_STOPPED")
+
+	mu.Lock()
+	frpsCmd = nil
+	mu.Unlock()
 }
 
-//export StopFrps
-func StopFrps() {
+func stopFrps() {
 	mu.Lock()
 	defer mu.Unlock()
 	if frpsCmd != nil && frpsCmd.Process != nil {
 		_ = frpsCmd.Process.Kill()
 		frpsCmd = nil
-		status("FRPS_STOPPING")
+		sendStatus("FRPS_STOPPING")
 		logf("frps stopped")
 	}
 }
+
+// 空实现，避免报错
+func CallJavaVoidMethod(env uintptr, method uintptr, arg *C.char) {}
 
 func main() {}
