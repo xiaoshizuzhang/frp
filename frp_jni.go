@@ -20,43 +20,45 @@ var (
 	frpcCmd *exec.Cmd
 	frpsCmd *exec.Cmd
 
-	// 回调函数：Go -> Java
-	onLog   func(line *C.char)
-	onState func(state *C.char)
+	// 日志和状态的函数指针
+	logFunc    uintptr
+	stateFunc  uintptr
 )
 
 // 注册日志回调
-//export SetLogCallback
-func SetLogCallback(cb uintptr) {
+//export RegisterLog
+func RegisterLog(cb uintptr) {
 	mu.Lock()
-	onLog = *(*func(line *C.char))(unsafe.Pointer(cb))
+	logFunc = cb
 	mu.Unlock()
 }
 
 // 注册状态回调
-//export SetStateCallback
-func SetStateCallback(cb uintptr) {
+//export RegisterState
+func RegisterState(cb uintptr) {
 	mu.Lock()
-	onState = *(*func(state *C.char))(unsafe.Pointer(cb))
+	stateFunc = cb
 	mu.Unlock()
 }
 
-func log(s string) {
+// 调用 Java 日志回调
+func sendLog(msg string) {
 	mu.Lock()
 	defer mu.Unlock()
-	if onLog != nil {
-		cs := C.CString(s)
-		onLog(cs)
+	if logFunc != 0 {
+		cs := C.CString(msg)
+		(*(*func(uintptr))(unsafe.Pointer(logFunc)))(uintptr(unsafe.Pointer(cs)))
 		C.free(unsafe.Pointer(cs))
 	}
 }
 
-func state(s string) {
+// 调用 Java 状态回调
+func sendState(st string) {
 	mu.Lock()
 	defer mu.Unlock()
-	if onState != nil {
-		cs := C.CString(s)
-		onState(cs)
+	if stateFunc != 0 {
+		cs := C.CString(st)
+		(*(*func(uintptr))(unsafe.Pointer(stateFunc)))(uintptr(unsafe.Pointer(cs)))
 		C.free(unsafe.Pointer(cs))
 	}
 }
@@ -67,22 +69,21 @@ func StartFrpc(cfg *C.char) {
 		mu.Lock()
 		if frpcCmd != nil {
 			mu.Unlock()
-			log("frpc 已经运行")
+			sendLog("frpc 正在运行")
 			return
 		}
 		mu.Unlock()
 
-		state("STARTING")
-		log("启动 frpc...")
+		sendState("STARTING")
+		sendLog("开始启动 frpc...")
 
 		cmd := exec.Command("./frpc", "-c", C.GoString(cfg))
-
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
 		if err := cmd.Start(); err != nil {
-			log("启动失败: " + err.Error())
-			state("ERROR")
+			sendLog("启动失败: " + err.Error())
+			sendState("ERROR")
 			return
 		}
 
@@ -90,15 +91,13 @@ func StartFrpc(cfg *C.char) {
 		frpcCmd = cmd
 		mu.Unlock()
 
-		state("RUNNING")
-
-		// 输出日志到 Java
-		go scanPipe(stdout)
-		go scanPipe(stderr)
+		sendState("RUNNING")
+		go readPipe(stdout)
+		go readPipe(stderr)
 
 		_ = cmd.Wait()
-		state("STOPPED")
-		log("frpc 已停止")
+		sendState("STOPPED")
+		sendLog("frpc 已停止")
 
 		mu.Lock()
 		frpcCmd = nil
@@ -113,65 +112,23 @@ func StopFrpc() {
 	if frpcCmd != nil && frpcCmd.Process != nil {
 		_ = frpcCmd.Process.Kill()
 		frpcCmd = nil
-		state("STOPPING")
-		log("正在停止 frpc...")
+		sendState("STOPPING")
+		sendLog("手动停止 frpc")
 	}
 }
 
 //export StartFrps
 func StartFrps(cfg *C.char) {
-	go func() {
-		mu.Lock()
-		if frpsCmd != nil {
-			mu.Unlock()
-			log("frps 已经运行")
-			return
-		}
-		mu.Unlock()
-
-		state("SERVER_STARTING")
-		cmd := exec.Command("./frps", "-c", C.GoString(cfg))
-		stdout, _ := cmd.StdoutPipe()
-		stderr, _ := cmd.StderrPipe()
-
-		if err := cmd.Start(); err != nil {
-			log("frps 启动失败: " + err.Error())
-			state("SERVER_ERROR")
-			return
-		}
-
-		mu.Lock()
-		frpsCmd = cmd
-		mu.Unlock()
-
-		state("SERVER_RUNNING")
-		go scanPipe(stdout)
-		go scanPipe(stderr)
-
-		_ = cmd.Wait()
-		state("SERVER_STOPPED")
-		mu.Lock()
-		frpsCmd = nil
-		mu.Unlock()
-	}()
+	sendLog("暂未实现 frps，如需开启我可以加上")
 }
 
 //export StopFrps
-func StopFrps() {
-	mu.Lock()
-	defer mu.Unlock()
-	if frpsCmd != nil && frpsCmd.Process != nil {
-		_ = frpsCmd.Process.Kill()
-		frpsCmd = nil
-		state("SERVER_STOPPING")
-	}
-}
+func StopFrps() {}
 
-// 读取输出并回调
-func scanPipe(r io.Reader) {
+func readPipe(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		log(scanner.Text())
+		sendLog(scanner.Text())
 	}
 }
 
