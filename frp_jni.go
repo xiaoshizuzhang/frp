@@ -4,10 +4,6 @@ package main
 #cgo LDFLAGS: -llog
 #include <jni.h>
 #include <stdlib.h>
-#include <android/log.h>
-
-#define LOG_TAG "FRP"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 */
 import "C"
 import (
@@ -24,10 +20,10 @@ var (
 	frpsCmd    *exec.Cmd
 
 	jvm        *C.JavaVM
-	logObj     C.jobject  // 全局引用
-	logMethod  C.jmethodID
+	logObj     C.jobject
+	logMid     C.jmethodID
 	stateObj   C.jobject
-	stateMethod C.jmethodID
+	stateMid   C.jmethodID
 )
 
 //export Java_com_handreace_frp_FrpManager_initCallbacks
@@ -40,24 +36,20 @@ func Java_com_handreace_frp_FrpManager_initCallbacks(
 	// 获取 JavaVM
 	(*C.JNIEnv).GetJavaVM(env, &jvm)
 
-	// 日志回调
+	// 日志回调方法
 	logCls := (*C.JNIEnv).FindClass(env, C.CString("com/handreace/frp/FrpManager$LogCallback"))
-	logMethod = (*C.JNIEnv).GetMethodID(env, logCls, C.CString("onLog"), C.CString("(Ljava/lang/String;)V"))
+	logMid = (*C.JNIEnv).GetMethodID(env, logCls, C.CString("onLog"), C.CString("(Ljava/lang/String;)V"))
 	logObj = (*C.JNIEnv).NewGlobalRef(env, logCb)
 
-	// 状态回调
+	// 状态回调方法
 	stateCls := (*C.JNIEnv).FindClass(env, C.CString("com/handreace/frp/FrpManager$StateCallback"))
-	stateMethod = (*C.JNIEnv).GetMethodID(env, stateCls, C.CString("onState"), C.CString("(Ljava/lang/String;)V"))
+	stateMid = (*C.JNIEnv).GetMethodID(env, stateCls, C.CString("onState"), C.CString("(Ljava/lang/String;)V"))
 	stateObj = (*C.JNIEnv).NewGlobalRef(env, stateCb)
-
-	(*C.JNIEnv).DeleteLocalRef(env, logCls)
-	(*C.JNIEnv).DeleteLocalRef(env, stateCls)
 }
 
-// 安全回调 Java
+// 安全回调日志
 func onLog(msg string) {
-	if jvm == nil || logObj == nil || logMethod == nil {
-		C.LOGD(C.CString(msg))
+	if jvm == nil || logObj == nil || logMid == nil {
 		return
 	}
 
@@ -65,16 +57,19 @@ func onLog(msg string) {
 	if C.jint(jvm.AttachCurrentThread(jvm, &env, nil)) != C.JNI_OK {
 		return
 	}
-	cstr := C.CString(msg)
-	jstr := (*C.JNIEnv).NewStringUTF(env, cstr)
-	(*C.JNIEnv).CallVoidMethod(env, logObj, logMethod, jstr)
+
+	cs := C.CString(msg)
+	jstr := (*C.JNIEnv).NewStringUTF(env, cs)
+	(*C.JNIEnv).CallVoidMethod(env, logObj, logMid, jstr)
 	(*C.JNIEnv).DeleteLocalRef(env, jstr)
-	C.free(unsafe.Pointer(cstr))
+	C.free(unsafe.Pointer(cs))
+
 	jvm.DetachCurrentThread(jvm)
 }
 
+// 安全回调状态
 func onState(state string) {
-	if jvm == nil || stateObj == nil || stateMethod == nil {
+	if jvm == nil || stateObj == nil || stateMid == nil {
 		return
 	}
 
@@ -82,15 +77,17 @@ func onState(state string) {
 	if C.jint(jvm.AttachCurrentThread(jvm, &env, nil)) != C.JNI_OK {
 		return
 	}
-	cstr := C.CString(state)
-	jstr := (*C.JNIEnv).NewStringUTF(env, cstr)
-	(*C.JNIEnv).CallVoidMethod(env, stateObj, stateMethod, jstr)
+
+	cs := C.CString(state)
+	jstr := (*C.JNIEnv).NewStringUTF(env, cs)
+	(*C.JNIEnv).CallVoidMethod(env, stateObj, stateMid, jstr)
 	(*C.JNIEnv).DeleteLocalRef(env, jstr)
-	C.free(unsafe.Pointer(cstr))
+	C.free(unsafe.Pointer(cs))
+
 	jvm.DetachCurrentThread(jvm)
 }
 
-// ==================== FRPC ====================
+// ==================== FRPC 客户端 ====================
 //export Java_com_handreace_frp_FrpManager_startFrpc
 func Java_com_handreace_frp_FrpManager_startFrpc(env *C.JNIEnv, clazz C.jclass, path *C.char) {
 	go func() {
@@ -103,15 +100,14 @@ func Java_com_handreace_frp_FrpManager_startFrpc(env *C.JNIEnv, clazz C.jclass, 
 		mu.Unlock()
 
 		onState("FRPC_STARTING")
-		onLog("启动 frpc...")
+		onLog("FRPC 启动中...")
 
-		cfg := C.GoString(path)
-		cmd := exec.Command("./frpc", "-c", cfg)
+		cmd := exec.Command("./frpc", "-c", C.GoString(path))
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
 		if err := cmd.Start(); err != nil {
-			onLog("启动失败: " + err.Error())
+			onLog("FRPC 启动失败: " + err.Error())
 			onState("FRPC_ERROR")
 			return
 		}
@@ -121,12 +117,12 @@ func Java_com_handreace_frp_FrpManager_startFrpc(env *C.JNIEnv, clazz C.jclass, 
 		mu.Unlock()
 
 		onState("FRPC_RUNNING")
-		go scan(stdout)
-		go scan(stderr)
+		go readPipe(stdout)
+		go readPipe(stderr)
 
-		cmd.Wait()
+		_ = cmd.Wait()
 		onState("FRPC_STOPPED")
-		onLog("frpc 已停止")
+		onLog("FRPC 已停止")
 
 		mu.Lock()
 		frpcCmd = nil
@@ -142,11 +138,11 @@ func Java_com_handreace_frp_FrpManager_stopFrpc(env *C.JNIEnv, clazz C.jclass) {
 		_ = frpcCmd.Process.Kill()
 		frpcCmd = nil
 		onState("FRPC_STOPPING")
-		onLog("已停止 frpc")
+		onLog("FRPC 已手动停止")
 	}
 }
 
-// ==================== FRPS ====================
+// ==================== FRPS 服务端 ====================
 //export Java_com_handreace_frp_FrpManager_startFrps
 func Java_com_handreace_frp_FrpManager_startFrps(env *C.JNIEnv, clazz C.jclass, path *C.char) {
 	go func() {
@@ -159,15 +155,14 @@ func Java_com_handreace_frp_FrpManager_startFrps(env *C.JNIEnv, clazz C.jclass, 
 		mu.Unlock()
 
 		onState("FRPS_STARTING")
-		onLog("启动 frps...")
+		onLog("FRPS 启动中...")
 
-		cfg := C.GoString(path)
-		cmd := exec.Command("./frps", "-c", cfg)
+		cmd := exec.Command("./frps", "-c", C.GoString(path))
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
 		if err := cmd.Start(); err != nil {
-			onLog("启动失败: " + err.Error())
+			onLog("FRPS 启动失败: " + err.Error())
 			onState("FRPS_ERROR")
 			return
 		}
@@ -177,12 +172,12 @@ func Java_com_handreace_frp_FrpManager_startFrps(env *C.JNIEnv, clazz C.jclass, 
 		mu.Unlock()
 
 		onState("FRPS_RUNNING")
-		go scan(stdout)
-		go scan(stderr)
+		go readPipe(stdout)
+		go readPipe(stderr)
 
-		cmd.Wait()
+		_ = cmd.Wait()
 		onState("FRPS_STOPPED")
-		onLog("frps 已停止")
+		onLog("FRPS 已停止")
 
 		mu.Lock()
 		frpsCmd = nil
@@ -198,11 +193,11 @@ func Java_com_handreace_frp_FrpManager_stopFrps(env *C.JNIEnv, clazz C.jclass) {
 		_ = frpsCmd.Process.Kill()
 		frpsCmd = nil
 		onState("FRPS_STOPPING")
-		onLog("已停止 frps")
+		onLog("FRPS 已手动停止")
 	}
 }
 
-func scan(r io.Reader) {
+func readPipe(r io.Reader) {
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		onLog(sc.Text())
