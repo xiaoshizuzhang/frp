@@ -5,11 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-# 单任务编译所有架构 → 打包成一个 ZIP
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
       - uses: actions/checkout@v4
 
@@ -24,27 +22,22 @@ jobs:
           ndk-version: r26c
           link-to-sdk: true
 
-      # 编译 arm64-v8a
       - name: Build arm64-v8a
         run: |
-          NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           mkdir -p build/arm64-v8a
           export GOOS=android GOARCH=arm64 CGO_ENABLED=1
-          export CC=$NDK_BIN/aarch64-linux-android21-clang
+          export CC=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
           go build -ldflags "-s -w" -buildmode=c-shared -o build/arm64-v8a/libfrp.so
 
-      # 编译 armeabi-v7a
       - name: Build armeabi-v7a
         run: |
-          NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
           mkdir -p build/armeabi-v7a
           export GOOS=android GOARCH=arm CGO_ENABLED=1 GOARM=7
-          export CC=$NDK_BIN/armv7a-linux-androideabi21-clang
+          export CC=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang
           go build -ldflags "-s -w" -buildmode=c-shared -o build/armeabi-v7a/libfrp.so
 
-      # 一次性上传所有架构
       - name: Upload all
         uses: actions/upload-artifact@v4
         with:
-          name: frp-jni-all  # 最终包名
-          path: build/       # 把两个架构一起打包
+          name: frp-jni-all
+          path: build/
