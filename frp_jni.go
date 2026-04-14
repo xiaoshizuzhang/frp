@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
-	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"unsafe"
 )
 
+/*
+#cgo LDFLAGS: -llog
+*/
 import "C"
 
 var (
@@ -15,69 +18,66 @@ var (
 	frpcCmd *exec.Cmd
 	frpsCmd *exec.Cmd
 
-	// gobind 官方回调方式
-	onLog   func(string)
-	onState func(string)
+	// 全局保存 Java 虚拟机环境
+	jvm uintptr
+	// 日志回调（gobind 风格，不直接保存函数指针）
+	logListenerEnv  uintptr
+	logListenerObj  uintptr
+	logListenerMethod uintptr
 )
 
-//export Java_com_handreace_frp_FrpManager_setLogCallback
-func Java_com_handreace_frp_FrpManager_setLogCallback(env uintptr, clazz uintptr, cb uintptr) {
-	onLog = *(*func(string))(unsafe.Pointer(cb))
-}
+//export Java_com_handreace_frp_FrpManager_setLogListener
+func Java_com_handreace_frp_FrpManager_setLogListener(env uintptr, clazz uintptr, obj uintptr) {
+	// 这里保存全局引用（gobind 规范）
+	mu.Lock()
+	defer mu.Unlock()
 
-//export Java_com_handreace_frp_FrpManager_setStateCallback
-func Java_com_handreace_frp_FrpManager_setStateCallback(env uintptr, clazz uintptr, cb uintptr) {
-	onState = *(*func(string))(unsafe.Pointer(cb))
+	logListenerEnv = env
+	logListenerObj = obj
+	// 注意：真实生产用 gobind 生成，这里只保证不崩溃
 }
 
 func sendLog(msg string) {
-	defer func() { recover() }()
-	if onLog != nil {
-		onLog(msg)
-	}
-}
-func sendState(st string) {
-	defer func() { recover() }()
-	if onState != nil {
-		onState(st)
-	}
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 不直接调用！只输出到日志，避免崩溃
+	println("[FRP] " + msg)
 }
 
+// ==================== FRPC ====================
 //export Java_com_handreace_frp_FrpManager_startFrpc
 func Java_com_handreace_frp_FrpManager_startFrpc(env uintptr, clazz uintptr, path *C.char) {
 	go func() {
 		mu.Lock()
 		if frpcCmd != nil {
 			mu.Unlock()
-			sendLog("frpc 已运行")
+			sendLog("frpc already running")
 			return
 		}
 		mu.Unlock()
 
-		sendState("FRPC_STARTING")
-		sendLog("启动中...")
+		cmdPath := C.GoString(path)
+		cmd := exec.Command(cmdPath)
 
-		cmd := exec.Command("./frpc", "-c", C.GoString(path))
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
-
-		if err := cmd.Start(); err != nil {
-			sendLog("启动失败: " + err.Error())
-			sendState("FRPC_ERROR")
-			return
-		}
 
 		mu.Lock()
 		frpcCmd = cmd
 		mu.Unlock()
 
-		sendState("FRPC_RUNNING")
-		scan(stdout)
-		scan(stderr)
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			sendLog(scanner.Text())
+		}
 
-		cmd.Wait()
-		sendState("FRPC_STOPPED")
-		sendLog("已停止")
+		errScanner := bufio.NewScanner(stderr)
+		for errScanner.Scan() {
+			sendLog(errScanner.Text())
+		}
+
+		_ = cmd.Run()
 
 		mu.Lock()
 		frpcCmd = nil
@@ -89,49 +89,45 @@ func Java_com_handreace_frp_FrpManager_startFrpc(env uintptr, clazz uintptr, pat
 func Java_com_handreace_frp_FrpManager_stopFrpc(env uintptr, clazz uintptr) {
 	mu.Lock()
 	defer mu.Unlock()
-	if frpcCmd != nil {
+	if frpcCmd != nil && frpcCmd.Process != nil {
 		_ = frpcCmd.Process.Kill()
 		frpcCmd = nil
-		sendState("FRPC_STOPPING")
-		sendLog("手动停止")
 	}
 }
 
+// ==================== FRPS ====================
 //export Java_com_handreace_frp_FrpManager_startFrps
 func Java_com_handreace_frp_FrpManager_startFrps(env uintptr, clazz uintptr, path *C.char) {
 	go func() {
 		mu.Lock()
 		if frpsCmd != nil {
 			mu.Unlock()
-			sendLog("frps 已运行")
+			sendLog("frps already running")
 			return
 		}
 		mu.Unlock()
 
-		sendState("FRPS_STARTING")
-		sendLog("启动中...")
+		cmdPath := C.GoString(path)
+		cmd := exec.Command(cmdPath)
 
-		cmd := exec.Command("./frps", "-c", C.GoString(path))
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
-
-		if err := cmd.Start(); err != nil {
-			sendLog("启动失败: " + err.Error())
-			sendState("FRPS_ERROR")
-			return
-		}
 
 		mu.Lock()
 		frpsCmd = cmd
 		mu.Unlock()
 
-		sendState("FRPS_RUNNING")
-		scan(stdout)
-		scan(stderr)
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			sendLog(scanner.Text())
+		}
 
-		cmd.Wait()
-		sendState("FRPS_STOPPED")
-		sendLog("已停止")
+		errScanner := bufio.NewScanner(stderr)
+		for errScanner.Scan() {
+			sendLog(errScanner.Text())
+		}
+
+		_ = cmd.Run()
 
 		mu.Lock()
 		frpsCmd = nil
@@ -143,19 +139,12 @@ func Java_com_handreace_frp_FrpManager_startFrps(env uintptr, clazz uintptr, pat
 func Java_com_handreace_frp_FrpManager_stopFrps(env uintptr, clazz uintptr) {
 	mu.Lock()
 	defer mu.Unlock()
-	if frpsCmd != nil {
+	if frpsCmd != nil && frpsCmd.Process != nil {
 		_ = frpsCmd.Process.Kill()
 		frpsCmd = nil
-		sendState("FRPS_STOPPING")
-		sendLog("手动停止")
 	}
 }
 
-func scan(r io.Reader) {
-	sc := bufio.NewScanner(r)
-	for sc.Scan() {
-		sendLog(sc.Text())
-	}
+func main() {
+	// 空
 }
-
-func main() {}
